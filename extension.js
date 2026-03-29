@@ -168,38 +168,58 @@ const WorkspaceIndicators = GObject.registerClass(
 );
 
 let _patched = false;
+let _sessionSignal = null;
 
 function patchButton() {
-  const button = Main.panel.statusArea.activities;
-  if (!button) return;
+    const button = Main.panel.statusArea.activities;
+    if (!button) return;
 
-  const logo = button
-    .get_children()
-    .find((c) => c.style_class?.includes("activities-logo"));
-  if (!logo) return;
+    const logo = button.get_children().find(
+        c => c.style_class?.includes('activities-logo')
+    );
 
-  button.remove_child(logo);
-  logo.destroy();
-  button.add_child(new WorkspaceIndicators());
-  _patched = true;
+    // Also check if our indicator is already there and healthy
+    const already = button.get_children().find(
+        c => c instanceof WorkspaceIndicators
+    );
+    if (already) return;
+
+    if (logo) {
+        button.remove_child(logo);
+        logo.destroy();
+    }
+
+    button.add_child(new WorkspaceIndicators());
+    _patched = true;
 }
 
 export default class FixActivitiesExtension {
-  enable() {
-    _patched = false;
-    patchButton();
-  }
+    enable() {
+        _patched = false;
+        patchButton();
 
-  disable() {
-    if (!_patched) return;
-    const button = Main.panel.statusArea.activities;
-    if (!button) return;
-    const wi = button
-      .get_children()
-      .find((c) => c instanceof WorkspaceIndicators);
-    if (wi) {
-      button.remove_child(wi);
-      wi.destroy();
+        // Re-patch when returning from lock screen
+        _sessionSignal = Main.sessionMode.connect('updated', () => {
+            if (!Main.sessionMode.isLocked)
+                patchButton();
+        });
     }
-  }
+
+    disable() {
+        if (_sessionSignal) {
+            Main.sessionMode.disconnect(_sessionSignal);
+            _sessionSignal = null;
+        }
+
+        if (!_patched) return;
+        const button = Main.panel.statusArea.activities;
+        if (!button) return;
+        const wi = button.get_children().find(
+            c => c instanceof WorkspaceIndicators
+        );
+        if (wi) {
+            button.remove_child(wi);
+            wi.destroy();
+        }
+    }
 }
