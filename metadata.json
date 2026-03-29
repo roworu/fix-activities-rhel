@@ -3,6 +3,6 @@
   "description": "Remove RHEL branding from activities button",
   "url": "https://github.com/roworu/fix-activities-rhel",
   "uuid": "fix-activities-rhel@roworu",
-  "version": 1,
+  "version": 2,
   "shell-version": ["47", "48"]
 }
