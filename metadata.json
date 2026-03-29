@@ -1,0 +1,6 @@
+{
+  "name": "Fix activities on RHEL",
+  "description": "Remove RHEL branding from activities button",
+  "uuid": "fix-activities-rhel@roworu",
+  "shell-version": ["47", "48"]
+}
