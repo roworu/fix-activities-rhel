@@ -1,0 +1,1 @@
+zip dist/fix-activities-rhel@roworu.zip metadata.json extension.js stylesheet.css readme.md
