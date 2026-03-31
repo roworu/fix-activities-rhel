@@ -5,11 +5,16 @@ import St from "gi://St";
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
 import * as Util from "resource:///org/gnome/shell/misc/util.js";
 
+// Inactive workspace dots are slightly smaller so the current one stands out.
 const INACTIVE_WORKSPACE_DOT_SCALE = 0.75;
 
+// A single workspace indicator dot.
+// This is a custom actor so we can animate both appearance and width.
 const WorkspaceDot = GObject.registerClass(
   {
     Properties: {
+      // 0..1 value that describes how "active" this dot is.
+      // 1 means "this workspace is active", 0 means fully inactive.
       expansion: GObject.ParamSpec.double(
         "expansion",
         null,
@@ -19,6 +24,8 @@ const WorkspaceDot = GObject.registerClass(
         1.0,
         0.0,
       ),
+      // Width stretch factor used for the active-ish dot shape.
+      // GNOME's upstream style makes the active dot wider than inactive dots.
       "width-multiplier": GObject.ParamSpec.double(
         "width-multiplier",
         null,
@@ -56,6 +63,7 @@ const WorkspaceDot = GObject.registerClass(
 
     _updateVisuals() {
       const { expansion } = this;
+      // Interpolate visual properties from inactive -> active.
       this._dot.set({
         opacity: Util.lerp(0.5, 1.0, expansion) * 255,
         scaleX: Util.lerp(INACTIVE_WORKSPACE_DOT_SCALE, 1.0, expansion),
@@ -64,6 +72,7 @@ const WorkspaceDot = GObject.registerClass(
     }
 
     vfunc_get_preferred_width(forHeight) {
+      // Give active dots extra width while keeping inactive ones compact.
       const factor = Util.lerp(1.0, this.widthMultiplier, this.expansion);
       return this._dot
         .get_preferred_width(forHeight)
@@ -92,6 +101,7 @@ const WorkspaceDot = GObject.registerClass(
 
     scaleOutAndDestroy() {
       this._destroying = true;
+      // Animate out first, then destroy so removing workspaces feels smooth.
       this.ease({
         duration: 500,
         mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
@@ -107,11 +117,14 @@ const WorkspaceDot = GObject.registerClass(
   },
 );
 
+// Container that manages one dot per workspace and keeps them in sync
+// with GNOME Shell's dynamic workspace state.
 const WorkspaceIndicators = GObject.registerClass(
   class WorkspaceIndicators extends St.BoxLayout {
-    constructor() {
-      super();
+    constructor(params = {}) {
+      super(params);
 
+      // Tracks current workspace index (`value`) and workspace count (`upper`).
       this._workspacesAdjustment = Main.createWorkspacesAdjustment(this);
       this._workspacesAdjustment.connectObject(
         "notify::value",
@@ -135,6 +148,8 @@ const WorkspaceIndicators = GObject.registerClass(
       const nIndicators = activeIndicators.length;
       const targetIndicators = this._workspacesAdjustment.upper;
 
+      // Add or remove dots when workspace count changes.
+      // We animate add/remove so lock/unlock and dynamic workspaces feel natural.
       let remaining = Math.abs(nIndicators - targetIndicators);
       while (remaining--) {
         if (nIndicators < targetIndicators) {
@@ -153,6 +168,7 @@ const WorkspaceIndicators = GObject.registerClass(
       const nIndicators = this._getActiveIndicators().length;
       const activeWorkspace = this._workspacesAdjustment.value;
 
+      // Keep total width reasonable when many workspaces exist.
       let widthMultiplier;
       if (nIndicators <= 2) widthMultiplier = 3.625;
       else if (nIndicators <= 5) widthMultiplier = 3.25;
@@ -160,6 +176,7 @@ const WorkspaceIndicators = GObject.registerClass(
 
       this.get_children().forEach((indicator, index) => {
         const distance = Math.abs(index - activeWorkspace);
+        // Nearest dot gets expansion near 1; farther ones approach 0.
         indicator.expansion = Math.clamp(1 - distance, 0, 1);
         indicator.widthMultiplier = widthMultiplier;
       });
@@ -167,38 +184,53 @@ const WorkspaceIndicators = GObject.registerClass(
   },
 );
 
-let _patched = false;
 let _sessionSignal = null;
+const INJECTED_INDICATORS_NAME = "fix-activities-rhel-indicators";
+const RHEL_ACTIVITIES_LOGO_CLASS = "activities-logo";
+const RHEL_ACTIVITIES_LOGO_ICON = "fedora-logo-icon";
 
 function patchButton() {
+    // GNOME panel "Activities" button host.
     const button = Main.panel.statusArea.activities;
     if (!button) return;
 
+    // RHEL patch adds a branding logo widget; remove it if present.
     const logo = button.get_children().find(
-        c => c.style_class?.includes('activities-logo')
+        c => c.style_class?.includes(RHEL_ACTIVITIES_LOGO_CLASS)
     );
 
-    // Also check if our indicator is already there and healthy
+    // Avoid duplicating indicators if enable/updated runs multiple times.
     const already = button.get_children().find(
-        c => c instanceof WorkspaceIndicators
+        c => c.name === INJECTED_INDICATORS_NAME
+            || c._fixActivitiesRhelInjected === true
     );
     if (already) return;
 
-    if (logo) {
-        button.remove_child(logo);
-        logo.destroy();
-    }
+    // Only patch RHEL's branding variant. On upstream/non-branded builds,
+    // do nothing to avoid duplicating the stock workspace indicators.
+    if (!logo) return;
 
-    button.add_child(new WorkspaceIndicators());
-    _patched = true;
+    button.remove_child(logo);
+    logo.destroy();
+
+    // Insert our workspace indicator replacement.
+    const indicators = new WorkspaceIndicators({
+        name: INJECTED_INDICATORS_NAME,
+    });
+    indicators._fixActivitiesRhelInjected = true;
+    button.add_child(indicators);
 }
 
 export default class FixActivitiesExtension {
     enable() {
-        _patched = false;
+        if (_sessionSignal) {
+            Main.sessionMode.disconnect(_sessionSignal);
+            _sessionSignal = null;
+        }
+
         patchButton();
 
-        // Re-patch when returning from lock screen
+        // Lock/unlock can rebuild panel actors; re-apply after unlock.
         _sessionSignal = Main.sessionMode.connect('updated', () => {
             if (!Main.sessionMode.isLocked)
                 patchButton();
@@ -211,15 +243,35 @@ export default class FixActivitiesExtension {
             _sessionSignal = null;
         }
 
-        if (!_patched) return;
+        // Remove only what this extension added.
         const button = Main.panel.statusArea.activities;
         if (!button) return;
-        const wi = button.get_children().find(
-            c => c instanceof WorkspaceIndicators
+        const injectedIndicators = button.get_children().filter(c => {
+            if (c.name === INJECTED_INDICATORS_NAME || c._fixActivitiesRhelInjected === true)
+                return true;
+            if (c instanceof WorkspaceIndicators)
+                return true;
+
+            // Fallback for indicators created by older extension revisions.
+            if (typeof c.get_children !== "function")
+                return false;
+            return c.get_children().some(child => child.style_class?.includes("workspace-dot"));
+        });
+
+        injectedIndicators.forEach(indicators => {
+            button.remove_child(indicators);
+            indicators.destroy();
+        });
+
+        // Restore the original RHEL branding icon we replaced in enable().
+        const hasLogo = button.get_children().some(
+            c => c.style_class?.includes(RHEL_ACTIVITIES_LOGO_CLASS)
         );
-        if (wi) {
-            button.remove_child(wi);
-            wi.destroy();
+        if (!hasLogo) {
+            button.add_child(new St.Icon({
+                icon_name: RHEL_ACTIVITIES_LOGO_ICON,
+                style_class: RHEL_ACTIVITIES_LOGO_CLASS,
+            }));
         }
     }
 }
